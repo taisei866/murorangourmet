@@ -35,3 +35,21 @@ Supabase の Table Editor で shops に行を追加、または CSV インポー
 - 口コミへの写真添付（Supabase Storage）
 - 店舗写真の表示
 - 口コミの通報・管理者による非表示
+
+---
+## 追加機能（店舗自動取り込み・プロフィール・画像）
+
+### 1. DB変更
+SQL Editor で `migration.sql` を実行 → 最後の行のメールアドレスを自分のものに変えて実行すると管理者になります。
+
+### 2. 店舗の自動取り込み（GitHub Actions）
+1. https://webservice.recruit.co.jp/ でホットペッパーのAPIキーを取得（無料）
+2. GitHub の Settings → Secrets and variables → Actions → New repository secret で3つ登録
+   - `HOTPEPPER_KEY`：ホットペッパーのAPIキー
+   - `SUPABASE_URL`：Project URL
+   - `SUPABASE_SERVICE_KEY`：Supabase の service_role（secret）キー ※config.js には絶対に書かない
+3. Actions タブ →「店舗データ取り込み」→「Run workflow」で手動実行（以後は毎週月曜3時に自動）
+4. アプリのマイページ →「店舗の承認」で公開／却下
+
+### 3. 画像
+口コミ投稿・プロフィール編集で画像を選択できます（自動で縮小してから Supabase Storage に保存）。

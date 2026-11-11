@@ -8,8 +8,9 @@ const GENRES = [
   { k: 'やきとり・居酒屋', e: '🍢', c: '#C92A2A' },
   { k: 'カフェ・スイーツ・洋食', e: '☕', c: '#8D6E63' },
   { k: 'ワンコイン・激安大盛り', e: '💰', c: '#2F9E44' },
+  { k: '和食・中華・その他', e: '🍱', c: '#5C7CFA' },
 ];
-const AREAS = ['室蘭駅', '輪西', '中島', '東室蘭', '水元'];
+const AREAS = ['室蘭駅', '母恋', '輪西', '中島', '東室蘭', '水元', '鷲別', '白鳥台'];
 const TAGS = [['solo', '一人OK'], ['late', '夜遅くまで営業'], ['parking', '駐車場あり'], ['takeout', 'テイクアウト可']];
 const STATUS = { fav: '#fa5252', visit: '#2f9e44', none: '#1c7ed6' };
 const gm = s => GENRES.find(g => s.genre.startsWith(g.k)) || GENRES[0];
@@ -65,8 +66,21 @@ const DB = useSB ? {
   async signUp(name, email, pw) { return !!ok(await sb.auth.signUp({ email, password: pw, options: { data: { username: name }, emailRedirectTo: location.origin + location.pathname } })).session; },
   async signIn(email, pw) { ok(await sb.auth.signInWithPassword({ email, password: pw })); },
   async signOut() { await sb.auth.signOut(); },
-  async shops() { return ok(await sb.from('shops').select('*').order('id')); },
-  async reviews(id) { return ok(await sb.from('reviews').select('*').eq('shop_id', id).order('created_at', { ascending: false })); },
+  async shops() { return ok(await sb.from('shops').select('*').eq('status', 'public').order('id')); },
+  async reviews(id) { return ok(await sb.from('reviews').select('*, profiles(username, avatar_url)').eq('shop_id', id).order('created_at', { ascending: false })); },
+  async profile() { const u = (await sb.auth.getUser()).data.user; return ok(await sb.from('profiles').select('*').eq('id', u.id).maybeSingle()) || { username: u.user_metadata?.username }; },
+  async saveProfile(p) {
+    const u = (await sb.auth.getUser()).data.user;
+    ok(await sb.from('profiles').update({ ...p, updated_at: new Date().toISOString() }).eq('id', u.id));
+    await sb.auth.updateUser({ data: { username: p.username } });
+  },
+  async upload(blob) {
+    const u = (await sb.auth.getUser()).data.user, path = `${u.id}/${Date.now()}.jpg`;
+    ok(await sb.storage.from('images').upload(path, blob, { contentType: 'image/jpeg' }));
+    return sb.storage.from('images').getPublicUrl(path).data.publicUrl;
+  },
+  async pending() { return ok(await sb.from('shops').select('*').eq('status', 'pending').order('fetched_at', { ascending: false })); },
+  async setStatus(id, status) { ok(await sb.from('shops').update({ status }).eq('id', id)); },
   async addReview(r) { ok(await sb.from('reviews').insert(r)); },
   async ratings() { return ok(await sb.from('reviews').select('shop_id,rating')); },
   async ids(t) { return ok(await sb.from(t).select('shop_id')).map(x => x.shop_id); },
@@ -87,8 +101,21 @@ const DB = useSB ? {
   },
   async signOut() { LS.set('session', null); },
   async shops() { return SAMPLE; },
-  async reviews(id) { return (LS.get('reviews') || []).filter(r => r.shop_id === id).reverse(); },
-  async addReview(r) { LS.set('reviews', [...(LS.get('reviews') || []), r]); },
+  async reviews(id) {
+    const us = LS.get('users') || [];
+    return (LS.get('reviews') || []).filter(r => r.shop_id === id).reverse()
+      .map(r => { const u = us.find(x => x.id === r.user_id); return { ...r, profiles: u && { username: u.name, avatar_url: u.avatar_url } }; });
+  },
+  async addReview(r) { LS.set('reviews', [...(LS.get('reviews') || []), { ...r, user_id: myId() }]); },
+  async profile() { const u = (LS.get('users') || []).find(x => x.id === myId()) || {}; return { username: u.name, bio: u.bio, avatar_url: u.avatar_url, is_admin: false }; },
+  async saveProfile(p) {
+    const us = LS.get('users') || [], u = us.find(x => x.id === myId());
+    Object.assign(u, { name: p.username, bio: p.bio, avatar_url: p.avatar_url });
+    LS.set('users', us); LS.set('session', { id: u.id, name: p.username });
+  },
+  async upload(blob) { return new Promise(r => { const f = new FileReader(); f.onload = () => r(f.result); f.readAsDataURL(blob); }); },
+  async pending() { return []; },
+  async setStatus() {},
   async ratings() { return LS.get('reviews') || []; },
   async ids(t) { return (LS.get(t) || []).filter(x => x.u === myId()).map(x => x.s); },
   async add(t, id) { const a = LS.get(t) || []; if (!a.some(x => x.u === myId() && x.s === id)) LS.set(t, [...a, { u: myId(), s: id }]); },
@@ -111,7 +138,27 @@ const rates = async () => {
 };
 const rate = r => r ? `<span class="rate">★${(r.sum / r.n).toFixed(1)}<small>(${r.n})</small></span>` : '<span class="rate none">★ -</span>';
 const stars = n => '★'.repeat(n) + '☆'.repeat(5 - n);
-const thumb = s => { const g = gm(s); return `<div class="thumb" style="--c:${g.c}">${g.e}</div>`; };
+const thumb = s => { const g = gm(s); return s.photo_url ? `<div class="thumb ph" style="--c:${g.c};background-image:url('${esc(s.photo_url)}')"></div>` : `<div class="thumb" style="--c:${g.c}">${g.e}</div>`; };
+const av = (name, url, cls = '') => url ? `<img class="avatar ${cls}" src="${esc(url)}" alt="">` : `<span class="avatar ${cls}">${esc((name || '?')[0])}</span>`;
+const CREDIT = '<p class="credit"><a href="http://webservice.recruit.co.jp/" target="_blank">Powered by ホットペッパーグルメ Webサービス</a></p>';
+// 画像：選択 → 縮小 → プレビュー（アップロードは送信時）
+const PICK = {};
+const resize = (file, max) => new Promise((res, rej) => {
+  const img = new Image();
+  img.onload = () => {
+    const k = Math.min(1, max / Math.max(img.width, img.height)), c = document.createElement('canvas');
+    c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(img.src); c.toBlob(res, 'image/jpeg', 0.8);
+  };
+  img.onerror = () => rej(Error('画像を読み込めませんでした'));
+  img.src = URL.createObjectURL(file);
+});
+window.pickImg = async (input, key, max) => {
+  const f = input.files[0]; if (!f) return;
+  PICK[key] = await resize(f, useSB ? max : Math.min(max, 600));
+  const el = $('#' + key); el.style.backgroundImage = `url(${URL.createObjectURL(PICK[key])})`; el.classList.add('has');
+};
+const upPick = async key => { const b = PICK[key]; delete PICK[key]; return b ? DB.upload(b) : null; };
 const yen = n => `¥${Number(n || 0).toLocaleString()}`;
 const empty = (t, p) => `<div class="empty"><div>🍽️</div><b>${t}</b><p>${p}</p></div>`;
 const toast = m => { const t = document.createElement('div'); t.className = 'toast'; t.textContent = m; document.body.append(t); setTimeout(() => t.remove(), 1900); };
@@ -160,10 +207,21 @@ window.openBus = (lat, lng) => open(`https://www.google.com/maps/dir/?api=1&orig
 window.doReview = async (f, id) => {
   try {
     const name = (await DB.user()).name;
-    await DB.addReview({ shop_id: id, rating: +f.rating.value, body: f.body.value, username: name, created_at: new Date().toISOString() });
+    f.querySelector('button').disabled = true;
+    const image_url = await upPick('rvimg');
+    await DB.addReview({ shop_id: id, rating: +f.rating.value, body: f.body.value, username: name, image_url, created_at: new Date().toISOString() });
     toast('口コミを投稿しました'); go('shop/' + id);
-  } catch (e) { errOut(f, e); }
+  } catch (e) { errOut(f, e); f.querySelector('button').disabled = false; }
 };
+window.doProfile = async f => {
+  try {
+    f.querySelector('button').disabled = true;
+    const p = await DB.profile(), avatar_url = (await upPick('avimg')) || p.avatar_url;
+    await DB.saveProfile({ username: f.username.value.trim(), bio: f.bio.value.trim(), avatar_url });
+    toast('プロフィールを保存しました'); go('mypage');
+  } catch (e) { errOut(f, e); f.querySelector('button').disabled = false; }
+};
+window.setStatus = async (id, st) => { await DB.setStatus(id, st); SHOPS = null; toast(st === 'public' ? '公開しました' : '却下しました'); render(); };
 
 // ===== 画面（番号は画面遷移図に対応） =====
 const V = {
@@ -190,10 +248,10 @@ const V = {
     const [all, R] = await Promise.all([shops(), rates()]);
     return { h: `<div class="home-head"><p>こんにちは、${esc(me.name)}さん</p><h1>今日はなに食べる？</h1>
       <a class="searchbox" href="#/filter">${I('search', 18)}<span>エリア・予算・こだわりで探す</span></a></div>
-      <section><h2>ジャンルから探す</h2><div class="ggrid">${gtiles()}<a class="gtile" href="#/list"><span>🍽️</span>すべて</a></div></section>
+      <section><div class="sec-head"><h2>ジャンルから探す</h2><a href="#/list">すべてのお店 ›</a></div><div class="ggrid">${gtiles()}</div></section>
       <section><h2>エリアから探す</h2><div class="chips">${AREAS.map(a => `<a class="chip" href="#/list?area=${encodeURIComponent(a)}">${a}</a>`).join('')}</div></section>
       <a class="mapbanner" href="#/map"><div><b>地図から探す</b><small>ピンをタップしてお店をチェック</small></div>${I('map', 30)}</a>
-      <section><h2>室蘭の名店</h2><div class="hscroll">${all.map(s => mini(s, R)).join('')}</div></section>` };
+      <section><h2>室蘭の名店</h2><div class="hscroll">${all.map(s => mini(s, R)).join('')}</div></section>${all.some(s => s.url) ? CREDIT : ''}` };
   },
   // 05 ジャンル選択
   genre: () => ({ t: 'ジャンル選択', h: `<h1>食べたいジャンルは？</h1><p class="muted">タップするとお店の一覧を表示します</p>
@@ -225,7 +283,7 @@ const V = {
     const s = await shopById(id), g = gm(s);
     const [rv, favs, vis] = await Promise.all([DB.reviews(id), DB.ids('favorites'), DB.ids('visits')]);
     const avg = rv.length ? rv.reduce((a, r) => a + r.rating, 0) / rv.length : 0, isF = favs.includes(id), isV = vis.includes(id);
-    return { t: '店舗詳細', h: `<div class="dhero" style="--c:${g.c}">${g.e}</div><div class="sheet">
+    return { t: '店舗詳細', h: `${s.photo_url ? `<div class="dhero ph" style="background-image:url('${esc(s.photo_url)}')"></div>` : `<div class="dhero" style="--c:${g.c}">${g.e}</div>`}<div class="sheet">
       <div>${genres(s).map(x => `<span class="tag">${esc(x)}</span> `).join('')}</div>
       <h1 class="dname">${esc(s.name)}</h1>
       <div class="drate"><span class="stars">${stars(Math.round(avg))}</span><b>${avg ? avg.toFixed(1) : '-'}</b><small>口コミ${rv.length}件</small>${isV ? '<span class="badge">✓ 訪問済み</span>' : ''}</div>
@@ -236,11 +294,13 @@ const V = {
         <li><i class="yen">¥</i><div><small>予算（1人あたり）</small>〜${yen(s.budget)}</div></li></ul>
       <div class="chips small">${TAGS.filter(([k]) => s[k]).map(([, t]) => `<span class="chip">${t}</span>`).join('')}</div>
       ${s.note ? `<div class="memo">💬 ${esc(s.note)}</div>` : ''}
+      ${s.url ? `<a class="btn sub" href="${esc(s.url)}" target="_blank">${I('ext', 18)}ホットペッパーで詳細・予約</a>` : ''}
       <button class="btn" onclick="visit(${id})" ${isV ? 'disabled' : ''}>${isV ? '✓ 訪問済み（スタンプ獲得済み）' : '訪問済みとして登録してスタンプGET'}</button>
       <div class="sec-head"><h2>口コミ</h2><a href="#/review/${id}">${I('edit', 16)} 書く</a></div>
-      ${rv.map(r => `<div class="rv"><div class="rvh"><span class="avatar">${esc((r.username || '?')[0])}</span><b>${esc(r.username)}</b>
-        <span class="stars">${stars(r.rating)}</span><small>${new Date(r.created_at).toLocaleDateString('ja-JP')}</small></div><p>${esc(r.body)}</p></div>`).join('')
-        || empty('まだ口コミはありません', '最初の口コミを書いてみませんか？')}</div>` };
+      ${rv.map(r => { const nm = r.profiles?.username || r.username; return `<div class="rv"><div class="rvh">${av(nm, r.profiles?.avatar_url)}<b>${esc(nm)}</b>
+        <span class="stars">${stars(r.rating)}</span><small>${new Date(r.created_at).toLocaleDateString('ja-JP')}</small></div><p>${esc(r.body)}</p>
+        ${r.image_url ? `<img class="rvimg" src="${esc(r.image_url)}" loading="lazy" alt="" onclick="open(this.src)">` : ''}</div>`; }).join('')
+        || empty('まだ口コミはありません', '最初の口コミを書いてみませんか？')}${s.url ? CREDIT : ''}</div>` };
   },
   // 10 店舗の地図
   async shopmap({ id }) {
@@ -265,6 +325,7 @@ const V = {
       <form onsubmit="doReview(this,${id});return false"><label class="f">評価</label>
       <div class="starin">${[5, 4, 3, 2, 1].map(n => `<input type="radio" name="rating" id="r${n}" value="${n}" ${n === 5 ? 'checked' : ''}><label for="r${n}">★</label>`).join('')}</div>
       <label class="f">口コミ<textarea name="body" rows="6" placeholder="料理の味、雰囲気、おすすめメニューなど" required></textarea></label>
+      <label class="f">写真（任意）</label><label class="imgpick"><input type="file" accept="image/*" onchange="pickImg(this,'rvimg',1280)"><div id="rvimg">${I('edit', 20)}<span>タップして写真を追加</span></div></label>
       <p class="err"></p><button class="btn">投稿する</button></form>` };
   },
   // 13 スタンプ（10店で1枚、1店50pt）
@@ -287,13 +348,37 @@ const V = {
   },
   // 15 マイページ
   async mypage({ me }) {
-    const [vis, favs] = await Promise.all([DB.ids('visits'), DB.ids('favorites')]);
-    return { t: 'マイページ', h: `<div class="profile"><div class="avatar lg">${esc(me.name[0])}</div><h1>${esc(me.name)}</h1></div>
+    const [vis, favs, p] = await Promise.all([DB.ids('visits'), DB.ids('favorites'), DB.profile()]);
+    const pend = p.is_admin ? (await DB.pending()).length : 0;
+    return { t: 'マイページ', h: `<div class="profile">${av(p.username || me.name, p.avatar_url, 'lg')}<h1>${esc(p.username || me.name)}</h1>
+      ${p.bio ? `<p class="bio">${esc(p.bio)}</p>` : ''}<a class="tbtn" href="#/profile">${I('edit', 14)}プロフィールを編集</a></div>
       <div class="stats"><div><b>${vis.length}</b><small>訪問</small></div><div><b>${favs.length}</b><small>お気に入り</small></div><div><b>${vis.length * 50}</b><small>ポイント</small></div></div>
       <div class="menu"><a href="#/mymap">${I('map')}<span>自分のマップ<br><small>訪問記録・お気に入りを地図で</small></span>${I('chev', 18)}</a>
         <a href="#/fav">${I('heart')}<span>お気に入りのお店</span>${I('chev', 18)}</a>
         <a href="#/stamp">${I('award')}<span>スタンプラリー達成状況</span>${I('chev', 18)}</a>
+        ${p.is_admin ? `<a href="#/admin">${I('list')}<span>店舗の承認（管理者）<br><small>承認待ち ${pend}件</small></span>${I('chev', 18)}</a>` : ''}
         <button class="danger" onclick="doLogout()">${I('logout')}<span>ログアウト</span></button></div>` };
+  },
+  // プロフィール編集
+  async profile({ me }) {
+    const p = await DB.profile();
+    return { t: 'プロフィール編集', h: `<form onsubmit="doProfile(this);return false">
+      <label class="avpick"><input type="file" accept="image/*" onchange="pickImg(this,'avimg',400)">
+        <div id="avimg" class="${p.avatar_url ? 'has' : ''}" style="${p.avatar_url ? `background-image:url('${esc(p.avatar_url)}')` : ''}"><span>${esc((p.username || me.name)[0])}</span></div><small>${I('edit', 14)} 画像を変更</small></label>
+      <label class="f">ユーザー名<input name="username" value="${esc(p.username || me.name)}" maxlength="20" required></label>
+      <label class="f">自己紹介<textarea name="bio" rows="4" maxlength="160" placeholder="好きなジャンルや推しのお店など">${esc(p.bio)}</textarea></label>
+      <p class="err"></p><button class="btn">保存する</button></form>` };
+  },
+  // 店舗の承認（管理者）
+  async admin() {
+    if (!(await DB.profile()).is_admin) throw Error('管理者のみ利用できます');
+    const list = await DB.pending();
+    return { t: '店舗の承認', h: `<p class="muted">自動取り込みで見つかった店舗です。公開すると一覧・地図に表示されます。</p>
+      ${list.map(s => `<div class="adm">${thumb(s)}<div class="cbody"><div class="cname">${esc(s.name)}</div>
+        <div class="cmeta"><span>${esc(s.genre)}</span><span>${esc(s.area)}</span>${s.budget ? `<span>〜${yen(s.budget)}</span>` : ''}</div>
+        <div class="cmeta">${esc(s.address)}</div>${s.url ? `<a class="cmeta" href="${esc(s.url)}" target="_blank">掲載ページを確認 ›</a>` : ''}
+        <div class="admbtn"><button class="btn" onclick="setStatus(${s.id},'public')">公開</button><button class="btn sub" onclick="setStatus(${s.id},'rejected')">却下</button></div></div></div>`).join('')
+        || empty('承認待ちの店舗はありません', '次回の自動取り込みをお待ちください')}${list.length ? CREDIT : ''}` };
   },
   // 16 自分のマップ
   async mymap() {
@@ -306,7 +391,7 @@ const V = {
 };
 
 const TABS = [['search', 'home', 'ホーム'], ['map', 'map', '地図'], ['stamp', 'award', 'スタンプ'], ['fav', 'heart', 'お気に入り'], ['mypage', 'user', 'マイページ']];
-const PARENT = { list: 'search', genre: 'search', filter: 'search', shop: 'search', shopmap: 'search', bus: 'search', review: 'search', mymap: 'mypage' };
+const PARENT = { list: 'search', genre: 'search', filter: 'search', shop: 'search', shopmap: 'search', bus: 'search', review: 'search', mymap: 'mypage', profile: 'mypage', admin: 'mypage' };
 const nav = cur => `<nav>${TABS.map(([k, ic, t]) => `<a class="${k === cur ? 'on' : ''}" href="#/${k}">${I(ic, 22)}${t}</a>`).join('')}</nav>`;
 
 // ===== ルーター =====
