@@ -33,7 +33,7 @@ const myId = () => (LS.get('session') || {}).id;
 
 const DB = useSB ? {
   async user() { const u = (await sb.auth.getSession()).data.session?.user; return u && { id: u.id, name: u.user_metadata?.username || u.email }; },
-  async signUp(name, email, pw) { return !!ok(await sb.auth.signUp({ email, password: pw, options: { data: { username: name } } })).session; },
+  async signUp(name, email, pw) { return !!ok(await sb.auth.signUp({ email, password: pw, options: { data: { username: name }, emailRedirectTo: location.origin + location.pathname } })).session; },
   async signIn(email, pw) { ok(await sb.auth.signInWithPassword({ email, password: pw })); },
   async signOut() { await sb.auth.signOut(); },
   async shops() { return ok(await sb.from('shops').select('*').order('id')); },
@@ -220,6 +220,8 @@ const NAV = `<nav><a href="#/search">ホーム</a><a href="#/map">地図</a><a h
 
 // ===== ルーター =====
 async function render() {
+  // メール確認リンクから戻った直後（#access_token=… / #error=…）
+  if (/access_token=|error=/.test(location.hash)) { const u = await DB.user(); history.replaceState(null, '', location.pathname); return go(u ? 'search' : 'login'); }
   const [path, qs = ''] = location.hash.slice(2).split('?');
   const [name = '', arg] = path.split('/');
   const me = await DB.user(), pub = ['', 'login', 'signup'].includes(name);
